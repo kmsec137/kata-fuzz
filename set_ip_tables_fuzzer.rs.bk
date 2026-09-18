@@ -1,0 +1,128 @@
+#![no_main]
+
+use libfuzzer_sys::fuzz_target;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::sync::{Mutex as StdMutex, OnceLock};
+use std::sync::Arc;
+use std::panic::AssertUnwindSafe;
+use slog::Drain;
+use sha2::{Sha256, Digest};
+use protobuf::Message;
+use protocols::agent::SetIPTablesRequest;
+use protocols::agent_ttrpc_async::AgentService as TtrpcAgentService;
+use kata_agent::sandbox::Sandbox;
+use kata_agent::rpc::AgentService;
+
+// ---------------------------------------------------------
+// 1. GLOBAL STATE & LOGGING PROXY
+// ---------------------------------------------------------
+static HARNESS_STATE: OnceLock<HarnessState> = OnceLock::new();
+
+struct HarnessState {
+    logger: slog::Logger,
+    csv_writer: StdMutex<File>,
+}
+
+pub struct KataFuzzer {
+    pub logger: slog::Logger,
+}
+
+impl KataFuzzer {
+    pub fn init() -> Self {
+        let state = HARNESS_STATE.get_or_init(|| {
+            let fuzzer_name = env!("CARGO_BIN_NAME");
+            
+            let script_bytes = include_bytes!("set_ip_tables_fuzzer.rs");
+            let mut hasher = Sha256::new();
+            hasher.update(script_bytes);
+            let hash_result = hasher.finalize();
+            let script_hash = hash_result
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
+            let short_hash = &script_hash[..8]; 
+            
+            let timestamp = chrono::Local::now().format("%Y%d%m_%H%M%S");
+            let file_prefix = format!("{}_{}_{}", fuzzer_name, short_hash, timestamp);
+            
+            let mut csv_file = OpenOptions::new()
+                .create(true).write(true).append(true)
+                .open(format!("{}.csv", file_prefix)).unwrap();
+            
+            let _ = writeln!(csv_file, "payload_size,exec_status,path_or_err");
+
+            let log_file = OpenOptions::new()
+                .create(true).write(true).append(true)
+                .open(format!("{}.log", file_prefix)).unwrap();
+                
+            let decorator = slog_term::PlainDecorator::new(log_file);
+            let drain = slog_term::FullFormat::new(decorator).build().fuse();
+            let drain = StdMutex::new(drain).fuse();
+            let logger = slog::Logger::root(drain, slog::o!("fuzzer" => fuzzer_name.to_string()));
+
+            HarnessState {
+                logger,
+                csv_writer: StdMutex::new(csv_file),
+            }
+        });
+
+        Self { logger: state.logger.clone() }
+    }
+
+    pub fn record_csv(&self, size: usize, status: &str, info: &str) {
+        if let Some(state) = HARNESS_STATE.get() {
+            if let Ok(mut csv) = state.csv_writer.lock() {
+                let _ = writeln!(csv, "{},{},{}", size, status, info);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------
+// 2. THE ACTUAL FUZZ TARGET
+// ---------------------------------------------------------
+fuzz_target!(|data: &[u8]| {
+    if data.is_empty() {
+        return;
+    }
+
+    let Ok(iptables_req) = SetIPTablesRequest::parse_from_bytes(data) else {
+        return; 
+    };
+
+    let data_len = iptables_req.data.len();
+    let harness = KataFuzzer::init();
+
+    // Wrap execution and leak the runtime per iteration to isolate async context/destructor issues
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let _guard = rt.enter();
+
+        rt.block_on(async {
+            let Ok(sandbox) = Sandbox::new(&harness.logger) else {
+                return;
+            };
+
+            let sandbox_arc = Arc::new(tokio::sync::Mutex::new(sandbox));
+            let agent_service = AgentService::new_for_fuzzing(sandbox_arc);
+
+            let ctx = ttrpc::r#async::TtrpcContext {
+                mh: Default::default(),
+                metadata: Default::default(),
+                timeout_nano: 0,
+            };
+
+            // Call the public ttRPC trait method implementation for SetIPTables
+            let _ = TtrpcAgentService::set_ip_tables(&agent_service, &ctx, iptables_req).await;
+        });
+
+        std::mem::forget(rt);
+    }));
+
+    harness.record_csv(data.len(), "executed", &format!("rule_bytes_{}", data_len));
+});
