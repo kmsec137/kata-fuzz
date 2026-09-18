@@ -1,0 +1,23 @@
+KMSEC (Pty) Ltd Source-Available Restricted License (KSARL)
+
+Copyright (c) 2026 KMSEC (Pty) Ltd. All rights reserved.
+
+Grant of Access and Limitations
+
+Permitted Action: You are granted the non-exclusive right to view, download, and copy the source code of this software solely for evaluation, educational, or code-review purposes.
+
+Prohibited Actions: You may not compile, run, modify, create derivative works of, publicly display, sublicense, sell, or distribute this software, in whole or in part, in any form or by any means, without the prior express written permission of KMSEC (Pty) Ltd.
+
+Requesting Permissions
+To obtain rights for commercial use, modifgit@github.com:kmsec137/kata-fuzz.gitication, integration, or distribution, you must formally apply for a commercial license or written authorization.
+
+Contact: Reach out to KMSEC (Pty) Ltd directly at [Insert Contact Email/Website] to discuss licensing terms.
+
+Termination
+This license and your right to access the code terminate automatically if you breach any of the terms outlined herein. Upon termination, you must immediately delete or destroy all copies of the source code in your possession.
+
+Disclaimer of Warranty
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL KMSEC (PTY) LTD BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Governing Law
+This license shall be governed by and construed in accordance with the laws of [Insert Jurisdiction/Country, e.g., South Africa], without regard to its conflict of law principles.
