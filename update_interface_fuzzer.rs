@@ -11,7 +11,7 @@ use slog::Drain;
 use sha2::{Sha256, Digest};
 use protobuf::Message;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use protocols::agent::UpdateContainerRequest;
+use protocols::agent::UpdateInterfaceRequest;
 use protocols::agent_ttrpc_async::AgentService as TtrpcAgentService;
 use kata_agent::sandbox::Sandbox;
 use kata_agent::rpc::AgentService;
@@ -22,7 +22,6 @@ struct HarnessState {
     logger: slog::Logger,
     csv_writer: StdMutex<File>,
     rt: tokio::runtime::Runtime,
-    agent_service: Arc<AgentService>,
 }
 
 pub struct KataFuzzer {
@@ -30,11 +29,15 @@ pub struct KataFuzzer {
 }
 
 impl KataFuzzer {
-    pub fn get_state() -> &'static HarnessState {
-        HARNESS_STATE.get_or_init(|| {
+    pub fn rt() -> &'static tokio::runtime::Runtime {
+        &HARNESS_STATE.get().unwrap().rt
+    }
+
+    pub fn init() -> Self {
+        let state = HARNESS_STATE.get_or_init(|| {
             let fuzzer_name = env!("CARGO_BIN_NAME");
             
-            let script_bytes = include_bytes!("update_container_fuzzer.rs");
+            let script_bytes = include_bytes!("update_interface_fuzzer.rs");
             let mut hasher = Sha256::new();
             hasher.update(script_bytes);
             let script_hash = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
@@ -70,59 +73,49 @@ impl KataFuzzer {
                 .build()
                 .unwrap();
 
-            // Initialize Sandbox and AgentService ONCE to prevent FD exhaustion
-            let agent_service = rt.block_on(async {
-                let sandbox = Sandbox::new(&logger).expect("Failed to initialize Sandbox");
-                let sandbox_arc = Arc::new(tokio::sync::Mutex::new(sandbox));
-                Arc::new(AgentService::new_for_fuzzing(sandbox_arc))
-            });
-
             HarnessState {
                 logger,
                 csv_writer: StdMutex::new(csv_file),
                 rt,
-                agent_service,
             }
-        })
-    }
+        });
 
-    pub fn init() -> Self {
-        let state = Self::get_state();
         Self { logger: state.logger.clone() }
     }
 
     pub fn record_csv(&self, size: usize, status: &str, info: &str, time_us: u128, seed_b64: &str) {
-        if let Ok(mut csv) = Self::get_state().csv_writer.lock() {
-            let _ = writeln!(csv, "{},{},{},{},{}", size, status, info, time_us, seed_b64);
+        if let Some(state) = HARNESS_STATE.get() {
+            if let Ok(mut csv) = state.csv_writer.lock() {
+                let _ = writeln!(csv, "{},{},{},{},{}", size, status, info, time_us, seed_b64);
+            }
         }
     }
 }
-
-const MOCK_CONTAINER_ID: &str = "fuzz-mock-container-001";
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() { return; }
     let start_time = Instant::now();
 
-    let Ok(mut update_req) = UpdateContainerRequest::parse_from_bytes(data) else { return; };
-    update_req.container_id = MOCK_CONTAINER_ID.to_string();
-    let container_id_clone = update_req.container_id.clone();
+    let Ok(update_req) = UpdateInterfaceRequest::parse_from_bytes(data) else { return; };
     
     let harness = KataFuzzer::init();
-    let state = KataFuzzer::get_state();
+    let rt = KataFuzzer::rt();
 
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let _guard = state.rt.enter();
+        let _guard = rt.enter();
 
-        state.rt.block_on(async {
+        rt.block_on(async {
+            let Ok(sandbox) = Sandbox::new(&harness.logger) else { return; };
+            let sandbox_arc = Arc::new(tokio::sync::Mutex::new(sandbox));
+            let agent_service = AgentService::new_for_fuzzing(sandbox_arc);
+
             let ctx = ttrpc::r#async::TtrpcContext {
                 mh: Default::default(),
                 metadata: Default::default(),
                 timeout_nano: 0,
             };
 
-            // Process the mutated request directly against the persistent agent state
-            let _ = TtrpcAgentService::update_container(state.agent_service.as_ref(), &ctx, update_req).await;
+            let _ = TtrpcAgentService::update_interface(&agent_service, &ctx, update_req).await;
         });
     }));
 
@@ -130,5 +123,6 @@ fuzz_target!(|data: &[u8]| {
     let mut seed_base64 = BASE64_STANDARD.encode(data);
     if seed_base64.len() > 128 { seed_base64.truncate(128); }
 
-    harness.record_csv(data.len(), "executed", &container_id_clone, exec_time_us, &seed_base64);
+    // Using a generic identifier since interface struct contents can vary wildly depending on payload
+    harness.record_csv(data.len(), "executed", "interface_update", exec_time_us, &seed_base64);
 });
